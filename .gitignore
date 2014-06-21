@@ -4,3 +4,4 @@ log
 deps
 ebunny_pool.plt
 vm.args
+sys.config
