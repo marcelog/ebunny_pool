@@ -51,7 +51,7 @@
 -callback init(term()) -> init_result().
 -callback handle(
   #'basic.deliver'{}, #amqp_msg{}, callback_state()
-) -> init_result().
+) -> result().
 -callback terminate(term(), callback_state()) -> ok.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
