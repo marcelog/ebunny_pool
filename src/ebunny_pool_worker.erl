@@ -38,11 +38,20 @@
   | {callback, module()}
   | {callback_options, term()}.
 
+-type init_result():: {ok, callback_state()}|{error, term()}.
+-type result():: ok|error.
+
+-export_type([callback_state/0]).
+-export_type([option/0]).
+-export_type([result/0]).
+-export_type([init_result/0]).
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %%% Callback definitions.
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
--callback init(term()) -> {ok, callback_state()}|{error, term()}.
--callback handle(#'basic.deliver'{}, #amqp_msg{}, callback_state()) -> ok|error.
+-callback init(term()) -> init_result().
+-callback handle(
+  #'basic.deliver'{}, #amqp_msg{}, callback_state()
+) -> init_result().
 -callback terminate(term(), callback_state()) -> ok.
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -73,6 +82,7 @@ init(Options) ->
   erlang:send_after(0, self(), {connect}),
   CallbackModule = proplists:get_value(callback, Options),
   CallbackOptions = proplists:get_value(callback_options, Options),
+  lager:info("Initializing worker: ~p", [CallbackModule]),
   try
     case CallbackModule:init(CallbackOptions) of
       {ok, CallbackState} ->
