@@ -4,6 +4,8 @@ workers. It will automatically declare the exchange and queue needed, and create
  a [DLX](https://www.rabbitmq.com/dlx.html) for it too, so failed tasks can be
  retried after the specified interval.
 
+This is similar to [rabbitmq_minionpool](https://github.com/marcelog/rabbitmq_minionpool).
+
 # How to use
 Start the top level supervisor named **ebunny_pool_sup** from your own
 supervisor tree. Create a module that implements the behavior **ebunny_pool_worker**:
@@ -41,4 +43,22 @@ handle(
 
 terminate(_Reason, _State) ->
   ok.
+```
+
+To start a new consumer:
+```erlang
+ebunny_pool:new_consumer([
+  {user, "guest"},
+  {pass, "guest"},
+  {vhost, "/"},
+  {port, 5672},
+  {host, "127.0.0.1"},
+  {reconnect_timeout, 5000}, % If rabbitmq connection dies, try to reconnect every N milliseconds
+  {exchange, "workers"}, % Name of the excuange. DLX Exchange will be the same ++ ".retry"
+  {queue, "download"}, % Name of the queue. DLX Queue will be the same ++ ".retry"
+  {retry_timeout, 10000}, % TTL For the DLX queue.
+  {concurrency, 5}, % How many tasks to handle concurrently
+  {callback, sample_worker}, % Callback module
+  {callback_options, []} % Options sent to Callback:init/1
+]).
 ```
