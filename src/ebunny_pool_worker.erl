@@ -71,7 +71,7 @@
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 %% @doc Starts a new consumer.
 -spec start_link([option()]) -> {ok, pid()}.
-start_link(Options) -> 
+start_link(Options) ->
   gen_server:start_link(?MODULE, Options, []).
 
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
@@ -135,8 +135,14 @@ handle_info({connect}, State) ->
   Available = is_pid(Channel) andalso ChannelRef =/= undefined,
   if
     Available ->
-      Exchange = proplists:get_value(exchange, State#state.options),
-      Queue = proplists:get_value(queue, State#state.options),
+      Exchange = case proplists:get_value(exchange, State#state.options) of
+        Exchange_ = {_, _} -> Exchange_;
+        ExchangeName -> {ExchangeName, [{withretry, true}]}
+      end,
+      Queue = case proplists:get_value(queue, State#state.options) of
+        Queue_ = {_, _} -> Queue_;
+        QueueName -> {QueueName, [{withretry, true}]}
+      end,
       TaskRetry = proplists:get_value(retry_timeout, State#state.options),
       Concurrency = proplists:get_value(concurrency, State#state.options),
       ok = create_exchange(Channel, Exchange),
@@ -262,74 +268,92 @@ new_channel({ok, Connection}) ->
 new_channel(Error) ->
   Error.
 
--spec create_exchange(pid(), string()) -> ok.
-create_exchange(Channel, Name) ->
-  #'exchange.declare_ok'{} = amqp_channel:call(Channel, exchange_options(Name)),
-  #'exchange.declare_ok'{} = amqp_channel:call(
-    Channel, exchange_options(Name ++ ".retry")
-  ),
+-spec create_exchange(pid(), {string(), proplists:proplist()}) -> ok.
+create_exchange(Channel, {Name, Options}) ->
+  #'exchange.declare_ok'{} = amqp_channel:call(Channel, exchange_options(Name, Options)),
+  case proplists:get_value(withretry, Options) of
+    true ->
+      #'exchange.declare_ok'{} = amqp_channel:call(
+        Channel, exchange_options(Name ++ ".retry")
+      );
+    _ -> ok
+  end,
   ok.
 
--spec exchange_options(string()) -> #'exchange.declare'{}.
-exchange_options(Name) ->
+-spec exchange_options(string()|proplists:proplist()) -> #'exchange.declare'{}.
+exchange_options(Name, Options) ->
   #'exchange.declare'{
     exchange = list_to_binary(Name),
-    type        = <<"direct">>,
-    passive     = false,
-    durable     = true,
-    auto_delete = false,
-    arguments   = []
+    type        = proplists:get_value(type, Options, <<"direct">>),
+    passive     = proplists:get_value(passive, Options, false),
+    durable     = proplists:get_value(durable, Options, true),
+    auto_delete = proplists:get_value(auto_delete, Options, false),
+    arguments   = proplists:get_value(arguments, Options, [])
   }.
 
+exchange_options(Name) ->
+  exchange_options(Name, []).
+
 -spec create_queue(
-  pid(), string(), string(), pos_integer(), non_neg_integer()
+  pid(), {string(), proplists:proplist()},
+  {string(), proplists:proplist()}, pos_integer(), non_neg_integer()
 ) -> ok.
-create_queue(Channel, ExchangeName, Name, RetryTimeout, Concurrency) ->
-  QueueOptions = queue_options(Name, [
-    {<<"x-dead-letter-exchange">>, longstr, list_to_binary(ExchangeName ++ ".retry")},
-    {<<"x-dead-letter-routing-key">>, longstr, list_to_binary(Name ++ ".retry")}
-  ]),
+create_queue(Channel, {ExchangeName, Options}, {Name, QOptions}, RetryTimeout, Concurrency) ->
+  QArgs = case proplists:get_value(withretry, Options) of
+    true -> [
+      {<<"x-dead-letter-exchange">>, longstr, list_to_binary(ExchangeName ++ ".retry")},
+      {<<"x-dead-letter-routing-key">>, longstr, list_to_binary(Name ++ ".retry")}
+    ];
+    _ -> []
+  end,
+  QueueOptions = queue_options(Name, QOptions, QArgs),
   #'queue.declare_ok'{queue = Queue} = amqp_channel:call(Channel, QueueOptions),
 
-  RetryQueueOptions = queue_options(Name ++ ".retry", [
-    {<<"x-dead-letter-exchange">>, longstr, list_to_binary(ExchangeName)},
-    {<<"x-dead-letter-routing-key">>, longstr, list_to_binary(Name)},
-    {<<"x-message-ttl">>, long, RetryTimeout}
-  ]),
-  #'queue.declare_ok'{queue = RetryQueue} = amqp_channel:call(
-    Channel, RetryQueueOptions
-  ),
+  case proplists:get_value(withretry, Options) of
+    true ->
+      QRArgs = [
+        {<<"x-dead-letter-exchange">>, longstr, list_to_binary(ExchangeName)},
+        {<<"x-dead-letter-routing-key">>, longstr, list_to_binary(Name)},
+        {<<"x-message-ttl">>, long, RetryTimeout}
+      ],
+      RetryQueueOptions = queue_options(Name ++ ".retry", QOptions, QRArgs),
+      #'queue.declare_ok'{queue = RetryQueue} = amqp_channel:call(
+        Channel, RetryQueueOptions
+      ),
+      BindingRetry = #'queue.bind'{
+        queue = RetryQueue,
+        exchange = list_to_binary(ExchangeName ++ ".retry"),
+        routing_key = list_to_binary(Name ++ ".retry")
+      },
+      #'queue.bind_ok'{} = amqp_channel:call(Channel, BindingRetry);
+    _ -> ok
+  end,
 
   Binding = #'queue.bind'{
     queue = Queue,
     exchange = list_to_binary(ExchangeName),
-    routing_key = list_to_binary(Name)
+    routing_key = list_to_binary(proplists:get_value(routing_key, QOptions, Name))
   },
   #'queue.bind_ok'{} = amqp_channel:call(Channel, Binding),
-
-  BindingRetry = #'queue.bind'{
-    queue = RetryQueue,
-    exchange = list_to_binary(ExchangeName ++ ".retry"),
-    routing_key = list_to_binary(Name ++ ".retry")
-  },
-  #'queue.bind_ok'{} = amqp_channel:call(Channel, BindingRetry),
 
   #'basic.qos_ok'{} = amqp_channel:call(
     Channel, #'basic.qos'{prefetch_count = Concurrency}
   ),
   Sub = #'basic.consume'{
-    queue = list_to_binary(Name),
+    queue = Queue,
     no_ack = false
   },
   #'basic.consume_ok'{} = amqp_channel:call(Channel, Sub),
   ok.
 
--spec queue_options(string(), [term()]) -> #'queue.declare'{}.
-queue_options(Name, Arguments) ->
+-spec queue_options(
+  string(), proplists:proplist(), [term()]
+) -> #'queue.declare'{}.
+queue_options(Name, Options, Arguments) ->
   #'queue.declare'{
     queue = list_to_binary(Name),
-    durable = true,
-    exclusive = false,
-    auto_delete = false,
+    durable = proplists:get_value(durable, Options, true),
+    exclusive = proplists:get_value(exclusive, Options, false),
+    auto_delete = proplists:get_value(auto_delete, Options, false),
     arguments = Arguments
   }.
